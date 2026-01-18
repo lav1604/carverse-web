@@ -7,7 +7,7 @@
 
 // --- REST endpoints (Logic Apps) ---
 const RAAURI =
-  "https://prod-47.uksouth.logic.azure.com/workflows/fe03cc9f25784c638002509b447a3cb0/triggers/When_an_HTTP_request_is_received/paths/invoke/rest/v1/assets?api-version=2016-10-01&sp=%2Ftriggers%2FWhen_an_HTTP_request_is_received%2Frun&sv=1.0&sig=UzlsINngMfi77TwVIQ31tk0zv5IVkwJ8ZzLvg-aV0O8"; // READ ALL (GET) now returns { items,total,page,pageSize,search }
+  "https://prod-47.uksouth.logic.azure.com/workflows/fe03cc9f25784c638002509b447a3cb0/triggers/When_an_HTTP_request_is_received/paths/invoke/rest/v1/assets?api-version=2016-10-01&sp=%2Ftriggers%2FWhen_an_HTTP_request_is_received%2Frun&sv=1.0&sig=UzlsINngMfi77TwVIQ31tk0zv5IVkwJ8ZzLvg-aV0O8"; // READ ALL (GET): returns { items,total,page,pageSize,search }
 
 const CIAURI =
   "https://prod-10.uksouth.logic.azure.com/workflows/b613fa264a0c4abc8f2adb7d8447f9c5/triggers/When_an_HTTP_request_is_received/paths/invoke/rest/v1/assets?api-version=2016-10-01&sp=%2Ftriggers%2FWhen_an_HTTP_request_is_received%2Frun&sv=1.0&sig=b3LvQmYN7UoKrVeprTz9ZBvXFHhHipCEebMn5gPXP18"; // CREATE (POST)
@@ -32,15 +32,42 @@ const UPLOADSAS =
 const READSAS =
   "https://prod-34.uksouth.logic.azure.com/workflows/0968b01895ea44a78e97950797209edf/triggers/When_an_HTTP_request_is_received/paths/invoke/rest/v1/media/read?api-version=2016-10-01&sp=%2Ftriggers%2FWhen_an_HTTP_request_is_received%2Frun&sv=1.0&sig=sHmEpgqyFZVhNYJj0_Pfmv6zNU2wlC2TPNwoPxQSfVU";
 
-// ---- Paging/search state (works even if HTML has no controls) ----
+// ---- Paging/search state ----
 let currentPage = 1;
 let pageSize = 10;
 let currentSearch = "";
 
-// Cache SAS URLs so we don't call READSAS for the same blob repeatedly
+// Keep meta from last read
+let lastTotal = 0;
+let lastTotalPages = 1;
+
+// Cache SAS URLs so we don't call READSAS repeatedly for the same blob
 const sasCache = new Map(); // blobName -> { url, expiresUtcMs }
 
-// --- Helpers ---
+// --- Small helpers ---
+function escapeHtml(s) {
+  if (s === null || s === undefined) return "";
+  return String(s)
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;")
+    .replace(/"/g, "&quot;")
+    .replace(/'/g, "&#039;");
+}
+
+function setButtonEnabled(id, enabled) {
+  const el = document.getElementById(id);
+  if (el) el.disabled = !enabled;
+}
+
+function setBusy(isBusy) {
+  setButtonEnabled("retAssets", !isBusy);
+  setButtonEnabled("subNewForm", !isBusy);
+  setButtonEnabled("searchBtn", !isBusy);
+  setButtonEnabled("prevPage", !isBusy);
+  setButtonEnabled("nextPage", !isBusy);
+}
+
 function logAjaxError(prefix, xhr) {
   const msg = `${prefix} failed: ${xhr.status} ${xhr.statusText || ""}`;
   alert(msg);
@@ -48,6 +75,7 @@ function logAjaxError(prefix, xhr) {
   console.log("ResponseText:", xhr.responseText);
 }
 
+// Build asset object from form
 function buildAssetFromForm() {
   return {
     AssetLabel: $("#AssetLabel").val(),
@@ -71,13 +99,10 @@ function buildRAAUrl() {
   const params = [];
   params.push("page=" + encodeURIComponent(currentPage));
   params.push("pageSize=" + encodeURIComponent(pageSize));
-  if (currentSearch && currentSearch.trim() !== "") {
-    params.push("search=" + encodeURIComponent(currentSearch.trim()));
-  }
+  params.push("search=" + encodeURIComponent(currentSearch.trim()));
   return RAAURI + "&" + params.join("&");
 }
 
-// Optional: show paging info if #pageInfo exists
 function renderPagingMeta(meta) {
   const el = document.getElementById("pageInfo");
   if (!el) return;
@@ -85,9 +110,16 @@ function renderPagingMeta(meta) {
   const total = meta && meta.total != null ? meta.total : 0;
   const page = meta && meta.page != null ? meta.page : currentPage;
   const size = meta && meta.pageSize != null ? meta.pageSize : pageSize;
-  const totalPages = Math.max(1, Math.ceil(total / size));
 
-  el.textContent = `Page ${page} of ${totalPages} (Total: ${total})`;
+  const totalPages = Math.max(1, Math.ceil(total / Math.max(1, size)));
+  lastTotal = total;
+  lastTotalPages = totalPages;
+
+  el.textContent = `Page ${page} / ${totalPages} (Total: ${total})`;
+
+  // Disable prev/next appropriately
+  setButtonEnabled("prevPage", page > 1);
+  setButtonEnabled("nextPage", page < totalPages);
 }
 
 function parseSasExpiryMs(sasUrl) {
@@ -119,6 +151,12 @@ function requestUploadSas(file) {
 
 // 2) Upload the bytes to blob using PUT to sasUrl
 async function uploadFileToBlob(sasUrl, file) {
+  // Light client-side validation for marks / stability
+  const maxMb = 8;
+  if (file.size > maxMb * 1024 * 1024) {
+    throw new Error(`File too large. Max ${maxMb}MB.`);
+  }
+
   const res = await fetch(sasUrl, {
     method: "PUT",
     headers: {
@@ -158,14 +196,56 @@ function getReadSasUrlCached(blobName) {
   });
 }
 
-// --- Wire buttons (and optional controls if present) ---
+// --- Debounce so search doesn't spam requests ---
+let searchDebounceTimer = null;
+function triggerSearchDebounced() {
+  if (searchDebounceTimer) clearTimeout(searchDebounceTimer);
+  searchDebounceTimer = setTimeout(() => {
+    currentPage = 1;
+    getAssetList();
+  }, 350);
+}
+
+// --- Wire buttons ---
 $(document).ready(function () {
-  $("#retAssets").click(getAssetList);
+  // Initial page size from dropdown (if present)
+  const ps = parseInt($("#pageSize").val(), 10);
+  if (!Number.isNaN(ps)) pageSize = ps;
+
+  $("#retAssets").click(function () {
+    // Pull latest control values
+    currentSearch = ($("#searchBox").val() || "").trim();
+    const newPs = parseInt($("#pageSize").val(), 10);
+    if (!Number.isNaN(newPs)) pageSize = newPs;
+    currentPage = 1;
+    getAssetList();
+  });
+
   $("#subNewForm").click(submitNewAsset);
 
-  // Optional controls (won’t error if not in HTML)
+  $("#clearFormBtn").click(function () {
+    document.getElementById("newAssetForm")?.reset();
+    // keep search/paging
+  });
+
+  // Search box (debounced)
   $("#searchBox").on("input", function () {
-    currentSearch = $(this).val();
+    currentSearch = ($(this).val() || "").trim();
+    triggerSearchDebounced();
+  });
+
+  // Enter key triggers immediate refresh
+  $("#searchBox").on("keydown", function (e) {
+    if (e.key === "Enter") {
+      e.preventDefault();
+      currentSearch = ($(this).val() || "").trim();
+      currentPage = 1;
+      getAssetList();
+    }
+  });
+
+  $("#searchBtn").click(function () {
+    currentSearch = ($("#searchBox").val() || "").trim();
     currentPage = 1;
     getAssetList();
   });
@@ -182,8 +262,11 @@ $(document).ready(function () {
   });
 
   $("#nextPage").click(function () {
-    currentPage++;
-    getAssetList();
+    // prevent paging beyond last page if we know it
+    if (currentPage < lastTotalPages) {
+      currentPage++;
+      getAssetList();
+    }
   });
 });
 
@@ -191,17 +274,22 @@ $(document).ready(function () {
 async function submitNewAsset() {
   const subObj = buildAssetFromForm();
 
-  if (!subObj.AssetLabel) {
+  if (!subObj.AssetLabel || String(subObj.AssetLabel).trim() === "") {
     alert("Asset Label is required");
     return;
   }
 
+  setBusy(true);
+
   try {
     const file = getSelectedFile();
+
     if (file) {
       const sas = await requestUploadSas(file); // { blobName, sasUrl, contentType }
       await uploadFileToBlob(sas.sasUrl, file);
       subObj.MediaBlobName = sas.blobName; // store in SQL
+      // Optional: warm cache so image shows instantly
+      sasCache.delete(sas.blobName);
     }
 
     await $.ajax({
@@ -210,17 +298,24 @@ async function submitNewAsset() {
       data: JSON.stringify(subObj),
       contentType: "application/json; charset=utf-8",
       dataType: "text",
+      cache: false,
     });
 
+    // After create: reload first page with current filters
+    currentPage = 1;
     getAssetList();
   } catch (e) {
     alert(String(e));
     console.log(e);
+  } finally {
+    setBusy(false);
   }
 }
 
 // --- READ ALL (GET) + paging/search + display images using READ-SAS ---
 function getAssetList() {
+  setBusy(true);
+
   $("#AssetList").html(
     '<div class="spinner-border" role="status"><span class="sr-only">&nbsp;</span></div>'
   );
@@ -232,24 +327,29 @@ function getAssetList() {
     cache: false,
   })
     .done(function (data) {
-      // data is { items,total,page,pageSize,search }
-      const list = Array.isArray(data) ? data : (data.items || []);
+      // Expecting: { items,total,page,pageSize,search }
+      const items = data && Array.isArray(data.items) ? data.items : [];
       renderPagingMeta(data);
+
+      if (items.length === 0) {
+        $("#AssetList").html("<div class='alert alert-warning'>No assets found.</div>");
+        return;
+      }
 
       const html = [];
 
-      list.forEach((val) => {
+      items.forEach((val) => {
         const id = val.AssetID;
         const blobName = val.MediaBlobName;
 
         html.push(
           `<div style="border:1px solid #ddd; padding:10px; margin-bottom:10px; border-radius:8px;">` +
-            `<strong>Asset ID:</strong> ${id}<br/>` +
-            `<strong>Asset Label:</strong> ${val.AssetLabel}, <strong>Cost:</strong> ${val.Cost}<br/>` +
-            `<strong>Asset Type:</strong> ${val.AssetType}, <strong>Owner:</strong> ${val.NameOfOwner}<br/>` +
-            `<strong>Address 1:</strong> ${val.AddressLine1}<br/>` +
-            `<strong>Address 2:</strong> ${val.AddressLine2}<br/>` +
-            `<strong>Note:</strong> ${val.Note}<br/>`
+            `<strong>Asset ID:</strong> ${escapeHtml(id)}<br/>` +
+            `<strong>Asset Label:</strong> ${escapeHtml(val.AssetLabel)}, <strong>Cost:</strong> ${escapeHtml(val.Cost)}<br/>` +
+            `<strong>Asset Type:</strong> ${escapeHtml(val.AssetType)}, <strong>Owner:</strong> ${escapeHtml(val.NameOfOwner)}<br/>` +
+            `<strong>Address 1:</strong> ${escapeHtml(val.AddressLine1)}<br/>` +
+            `<strong>Address 2:</strong> ${escapeHtml(val.AddressLine2)}<br/>` +
+            `<strong>Note:</strong> ${escapeHtml(val.Note)}<br/>`
         );
 
         if (blobName) {
@@ -273,7 +373,7 @@ function getAssetList() {
       $("#AssetList").empty().append(html.join(""));
 
       // After rendering: fetch SAS URLs and inject <img>
-      const jobs = list
+      const jobs = items
         .filter((x) => x.MediaBlobName)
         .map((x) =>
           getReadSasUrlCached(x.MediaBlobName)
@@ -297,12 +397,19 @@ function getAssetList() {
     })
     .fail(function (xhr) {
       logAjaxError("Read", xhr);
+    })
+    .always(function () {
+      setBusy(false);
     });
 }
 
 // --- DELETE (DELETE /assets/{id}) ---
 function deleteAsset(id) {
+  if (!confirm("Delete asset " + id + "?")) return;
+
   const url = DIAURI0 + encodeURIComponent(id) + DIAURI1;
+
+  setBusy(true);
 
   $.ajax({
     method: "DELETE",
@@ -310,9 +417,18 @@ function deleteAsset(id) {
     dataType: "text",
     cache: false,
   })
-    .done(getAssetList)
+    .done(function () {
+      // If deleting last item on page, try to step back
+      if (currentPage > 1 && lastTotal > 0 && (lastTotal - 1) <= (currentPage - 1) * pageSize) {
+        currentPage--;
+      }
+      getAssetList();
+    })
     .fail(function (xhr) {
       logAjaxError("Delete", xhr);
+    })
+    .always(function () {
+      setBusy(false);
     });
 }
 
@@ -320,10 +436,12 @@ function deleteAsset(id) {
 async function updateAsset(id) {
   const updateObj = buildAssetFromForm();
 
-  if (!updateObj.AssetLabel) {
+  if (!updateObj.AssetLabel || String(updateObj.AssetLabel).trim() === "") {
     alert("Asset Label is required before updating.");
     return;
   }
+
+  setBusy(true);
 
   try {
     const file = getSelectedFile();
@@ -331,6 +449,7 @@ async function updateAsset(id) {
       const sas = await requestUploadSas(file);
       await uploadFileToBlob(sas.sasUrl, file);
       updateObj.MediaBlobName = sas.blobName;
+      sasCache.delete(sas.blobName);
     }
 
     const url = UIAURI0 + encodeURIComponent(id) + UIAURI1;
@@ -341,11 +460,14 @@ async function updateAsset(id) {
       data: JSON.stringify(updateObj),
       contentType: "application/json; charset=utf-8",
       dataType: "text",
+      cache: false,
     });
 
     getAssetList();
   } catch (e) {
     alert(String(e));
     console.log(e);
+  } finally {
+    setBusy(false);
   }
 }

@@ -1,14 +1,16 @@
 <!doctype html>
-<html lang="en" ng-app="Dashboard">
+<html lang="en">
   <head>
     <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+
     <link rel="icon" href="data:," />
     <title>Asset Tracker Web Application</title>
 
     <link rel="stylesheet" type="text/css" href="CSS/bootstrap.min.css" />
+
     <script type="text/javascript" src="JS/jquery-3.6.0.min.js"></script>
     <script type="text/javascript" src="JS/bootstrap.bundle.min.js"></script>
-
     <script type="text/javascript" src="JS/app.js"></script>
   </head>
 
@@ -20,7 +22,7 @@
         <div class="col-2"></div>
         <div class="col-8 text-center">
           <h3>Asset Tracker Web Application</h3>
-          <p class="text-muted" style="margin-bottom: 0;">
+          <p class="text-muted mb-0">
             CarVerse demo: CRUD + private blob storage (SAS links)
           </p>
         </div>
@@ -74,20 +76,24 @@
               <label for="MediaFile" class="form-label">Car photo</label>
               <input type="file" class="form-control" id="MediaFile" accept="image/*" />
               <small class="form-text text-muted">
-                Optional. Selecting a file will upload it to Blob Storage and store MediaBlobName in SQL.
+                Optional. Selecting a file uploads it to Blob Storage and stores MediaBlobName in SQL.
               </small>
             </div>
 
             <div class="d-flex gap-2 mb-3">
               <button type="button" id="subNewForm" class="btn btn-primary">Submit (Create)</button>
-              <button type="button" class="btn btn-outline-secondary" onclick="document.getElementById('newAssetForm').reset();">
+              <button
+                type="button"
+                id="clearFormBtn"
+                class="btn btn-outline-secondary"
+              >
                 Clear form
               </button>
             </div>
 
             <div class="alert alert-info py-2" style="font-size: 9.5pt;">
-              <strong>Tip:</strong> To update an item, type new values in the form, then click <em>Update</em> beside an Asset in the list.
-              If you choose a new photo, it will upload and replace the MediaBlobName for that Asset.
+              <strong>Tip:</strong> To update an item, change the form values, then click <em>Update</em> beside an asset.
+              Selecting a new photo uploads it and replaces the MediaBlobName for that asset.
             </div>
           </form>
         </div>
@@ -100,7 +106,7 @@
         <div class="col-2"></div>
 
         <div class="col-8" style="text-align: left;">
-          <!-- Controls row -->
+          <!-- Controls -->
           <div class="d-flex flex-wrap align-items-center justify-content-between gap-2" style="padding: 5px;">
             <div class="d-flex flex-wrap gap-2 align-items-center">
               <button id="retAssets" type="button" class="btn btn-primary">View Assets</button>
@@ -113,10 +119,13 @@
                 placeholder="Search (e.g., BMW)"
               />
 
-              <select id="pageSize" class="form-select" style="max-width: 120px;">
+              <button id="searchBtn" type="button" class="btn btn-secondary">Search</button>
+
+              <select id="pageSize" class="form-select" style="max-width: 140px;">
                 <option value="5">Page size: 5</option>
                 <option value="10" selected>Page size: 10</option>
                 <option value="20">Page size: 20</option>
+                <option value="50">Page size: 50</option>
               </select>
             </div>
 
@@ -138,7 +147,7 @@
       <div class="row mt-3">
         <div class="col-2"></div>
         <div class="col-8 text-muted" style="font-size: 9pt;">
-          If images don’t show, it usually means the item has no MediaBlobName yet, or the READ-SAS Logic App isn’t returning a SAS URL.
+          If images don’t show: the asset may have no MediaBlobName, or the READ-SAS Logic App may not be returning a SAS URL.
         </div>
         <div class="col-2"></div>
       </div>
