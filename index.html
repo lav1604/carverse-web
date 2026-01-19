@@ -22,6 +22,31 @@
       .btn-xs { padding: .25rem .5rem; font-size: .825rem; }
       .sticky-top-lite { position: sticky; top: 0; z-index: 10; backdrop-filter: blur(6px); }
     </style>
+
+    <!-- Application Insights (Browser Telemetry) -->
+    <script src="https://js.monitor.azure.com/scripts/b/ai.2.min.js"></script>
+    <script>
+      (function () {
+        var cs =
+          "InstrumentationKey=70d48605-e995-4608-b8ca-ac2dd45faaa5;IngestionEndpoint=https://uksouth-1.in.applicationinsights.azure.com/;LiveEndpoint=https://uksouth.livediagnostics.monitor.azure.com/;ApplicationId=dfe3e727-1ada-47da-9b6c-edefdc53271d";
+
+        // Create SDK instance and expose it for app.js
+        var ai = new Microsoft.ApplicationInsights.ApplicationInsights({
+          config: {
+            connectionString: cs,
+            enableAutoRouteTracking: true,
+            disableAjaxTracking: false,
+            disableFetchTracking: false,
+          },
+        });
+
+        ai.loadAppInsights();
+        ai.trackPageView();
+
+        window.appInsights = ai; // <-- app.js will use this
+      })();
+    </script>
+
   </head>
 
   <body>

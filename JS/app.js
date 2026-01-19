@@ -1,6 +1,7 @@
 // ===============================
 // CarVerse Asset Tracker - app.js
 // CRUD + Media (SAS upload/read) + Paging/Search + Theme + Download
+// + Application Insights events/errors
 // ===============================
 
 "use strict";
@@ -53,6 +54,38 @@ function escapeHtml(s) {
     .replace(/>/g, "&gt;")
     .replace(/"/g, "&quot;")
     .replace(/'/g, "&#039;");
+}
+
+// ---- App Insights helpers ----
+// NOTE: index.html must set window.appInsights (per the snippet you added)
+function aiTrackEvent(name, props) {
+  try {
+    const ai = window.appInsights;
+    if (ai && typeof ai.trackEvent === "function") {
+      ai.trackEvent({ name }, props || {});
+    }
+  } catch {}
+}
+
+function aiTrackException(err, props) {
+  try {
+    const ai = window.appInsights;
+    if (ai && typeof ai.trackException === "function") {
+      ai.trackException({ exception: err }, props || {});
+    }
+  } catch {}
+}
+
+function aiCommonProps(extra) {
+  return Object.assign(
+    {
+      page: String(currentPage),
+      pageSize: String(pageSize),
+      search: String(currentSearch || ""),
+      selectedAssetId: selectedAssetId ? String(selectedAssetId) : "",
+    },
+    extra || {}
+  );
 }
 
 function showStatus(msg, kind = "info", ms = 2500) {
@@ -233,6 +266,9 @@ function triggerSearchDebounced() {
   if (searchDebounceTimer) clearTimeout(searchDebounceTimer);
   searchDebounceTimer = setTimeout(() => {
     currentPage = 1;
+
+    aiTrackEvent("AssetSearch", aiCommonProps({ trigger: "debounced" }));
+
     getAssetList();
   }, 350);
 }
@@ -244,9 +280,12 @@ function applyTheme(theme) {
   localStorage.setItem("carverse_theme", isDark ? "dark" : "light");
 
   const topBar = document.getElementById("topBar");
-  if (topBar) topBar.className =
-    "d-flex flex-wrap align-items-center justify-content-between gap-2 p-2 rounded " +
-    (isDark ? "bg-dark" : "bg-light");
+  if (topBar)
+    topBar.className =
+      "d-flex flex-wrap align-items-center justify-content-between gap-2 p-2 rounded " +
+      (isDark ? "bg-dark" : "bg-light");
+
+  aiTrackEvent("ThemeChanged", { theme: isDark ? "dark" : "light" });
 }
 
 function initTheme() {
@@ -270,6 +309,9 @@ $(document).ready(function () {
     currentSearch = ($("#searchBox").val() || "").trim();
     pageSize = parseInt($("#pageSize").val(), 10) || 10;
     currentPage = 1;
+
+    aiTrackEvent("AssetsRefreshClicked", aiCommonProps());
+
     getAssetList();
   });
 
@@ -284,6 +326,7 @@ $(document).ready(function () {
     document.getElementById("newAssetForm")?.reset();
     setSelectedId(null);
     showStatus("Form cleared.", "secondary", 1200);
+    aiTrackEvent("FormCleared", aiCommonProps());
   });
 
   $("#searchBox").on("input", function () {
@@ -294,22 +337,34 @@ $(document).ready(function () {
   $("#searchBtn").click(function () {
     currentSearch = ($("#searchBox").val() || "").trim();
     currentPage = 1;
+
+    aiTrackEvent("AssetSearch", aiCommonProps({ trigger: "button" }));
+
     getAssetList();
   });
 
   $("#pageSize").on("change", function () {
     pageSize = parseInt($(this).val(), 10) || 10;
     currentPage = 1;
+
+    aiTrackEvent("PageSizeChanged", aiCommonProps({ newPageSize: String(pageSize) }));
+
     getAssetList();
   });
 
   $("#prevPage").click(function () {
     if (currentPage > 1) currentPage--;
+
+    aiTrackEvent("PageChanged", aiCommonProps({ direction: "prev" }));
+
     getAssetList();
   });
 
   $("#nextPage").click(function () {
     if (currentPage < lastTotalPages) currentPage++;
+
+    aiTrackEvent("PageChanged", aiCommonProps({ direction: "next" }));
+
     getAssetList();
   });
 });
@@ -342,6 +397,15 @@ async function submitNewAsset() {
       cache: false,
     });
 
+    aiTrackEvent(
+      "AssetCreated",
+      aiCommonProps({
+        hasImage: subObj.MediaBlobName ? "true" : "false",
+        assetType: subObj.AssetType || "",
+        owner: subObj.NameOfOwner || "",
+      })
+    );
+
     showStatus("Created ✅", "success", 1500);
     currentPage = 1;
     getAssetList();
@@ -349,6 +413,8 @@ async function submitNewAsset() {
     alert(String(e));
     console.log(e);
     showStatus("Create failed ❌", "danger", 3000);
+
+    aiTrackException(e, aiCommonProps({ area: "create" }));
   } finally {
     setBusy(false);
   }
@@ -360,7 +426,7 @@ function getAssetList() {
 
   $("#AssetList").html(
     '<div class="text-muted">Loading assets…</div>' +
-    '<div class="spinner-border" role="status"><span class="visually-hidden">Loading...</span></div>'
+      '<div class="spinner-border" role="status"><span class="visually-hidden">Loading...</span></div>'
   );
 
   $.ajax({
@@ -373,6 +439,14 @@ function getAssetList() {
       const items = data && Array.isArray(data.items) ? data.items : [];
       lastItems = items;
       renderPagingMeta(data);
+
+      aiTrackEvent(
+        "AssetsLoaded",
+        aiCommonProps({
+          count: String(items.length),
+          total: String(data?.total ?? ""),
+        })
+      );
 
       if (items.length === 0) {
         $("#AssetList").html("<div class='alert alert-warning'>No assets found.</div>");
@@ -388,25 +462,27 @@ function getAssetList() {
         html.push(
           `<div class="card shadow-sm mb-3 asset-card">` +
             `<div class="card-body">` +
-              `<div class="d-flex flex-wrap justify-content-between gap-2">` +
-                `<div>` +
-                  `<div class="text-muted muted-sm">Asset ID</div>` +
-                  `<div class="mono">${escapeHtml(id)}</div>` +
-                `</div>` +
-                `<div class="d-flex gap-2">` +
-                  `<button class="btn btn-outline-primary btn-xs" onclick="selectAsset(${id})">Select</button>` +
-                  `<button class="btn btn-warning btn-xs" onclick="updateAsset(${id})">Update</button>` +
-                  `<button class="btn btn-danger btn-xs" onclick="deleteAsset(${id})">Delete</button>` +
-                `</div>` +
-              `</div>` +
-
-              `<hr class="my-2" />` +
-
-              `<div><strong>${escapeHtml(val.AssetLabel)}</strong></div>` +
-              `<div class="text-muted muted-sm">Type: ${escapeHtml(val.AssetType)} | Owner: ${escapeHtml(val.NameOfOwner)}</div>` +
-              `<div class="mt-2">Cost: <strong>£${escapeHtml(val.Cost)}</strong></div>` +
-              `<div class="text-muted muted-sm mt-1">${escapeHtml(val.AddressLine1)} ${escapeHtml(val.AddressLine2)}</div>` +
-              `<div class="mt-2">${escapeHtml(val.Note)}</div>`
+            `<div class="d-flex flex-wrap justify-content-between gap-2">` +
+            `<div>` +
+            `<div class="text-muted muted-sm">Asset ID</div>` +
+            `<div class="mono">${escapeHtml(id)}</div>` +
+            `</div>` +
+            `<div class="d-flex gap-2">` +
+            `<button class="btn btn-outline-primary btn-xs" onclick="selectAsset(${id})">Select</button>` +
+            `<button class="btn btn-warning btn-xs" onclick="updateAsset(${id})">Update</button>` +
+            `<button class="btn btn-danger btn-xs" onclick="deleteAsset(${id})">Delete</button>` +
+            `</div>` +
+            `</div>` +
+            `<hr class="my-2" />` +
+            `<div><strong>${escapeHtml(val.AssetLabel)}</strong></div>` +
+            `<div class="text-muted muted-sm">Type: ${escapeHtml(val.AssetType)} | Owner: ${escapeHtml(
+              val.NameOfOwner
+            )}</div>` +
+            `<div class="mt-2">Cost: <strong>£${escapeHtml(val.Cost)}</strong></div>` +
+            `<div class="text-muted muted-sm mt-1">${escapeHtml(val.AddressLine1)} ${escapeHtml(
+              val.AddressLine2
+            )}</div>` +
+            `<div class="mt-2">${escapeHtml(val.Note)}</div>`
         );
 
         if (blobName) {
@@ -415,9 +491,11 @@ function getAssetList() {
               `<div id="imgloading-${id}" class="text-muted muted-sm">Loading image…</div>` +
               `<img id="img-${id}" class="asset-img mt-2" alt="asset image" style="display:none;" />` +
               `<div class="d-flex gap-2 mt-2">` +
-                `<button class="btn btn-outline-secondary btn-xs" onclick="downloadAssetImage('${escapeHtml(blobName)}')">Download photo</button>` +
+              `<button class="btn btn-outline-secondary btn-xs" onclick="downloadAssetImage('${escapeHtml(
+                blobName
+              )}')">Download photo</button>` +
               `</div>` +
-            `</div>`
+              `</div>`
           );
         } else {
           html.push(`<div class="mt-3 text-muted muted-sm">No image uploaded for this asset.</div>`);
@@ -436,12 +514,16 @@ function getAssetList() {
             .then((sasUrl) => {
               const img = document.getElementById(`img-${x.AssetID}`);
               const loading = document.getElementById(`imgloading-${x.AssetID}`);
-              if (img) { img.src = sasUrl; img.style.display = "block"; }
+              if (img) {
+                img.src = sasUrl;
+                img.style.display = "block";
+              }
               if (loading) loading.remove();
             })
-            .catch(() => {
+            .catch((e) => {
               const loading = document.getElementById(`imgloading-${x.AssetID}`);
               if (loading) loading.textContent = "Image failed to load";
+              aiTrackException(e, aiCommonProps({ area: "read-image", assetId: String(x.AssetID || "") }));
             })
         );
 
@@ -452,6 +534,8 @@ function getAssetList() {
       alert(`Read failed: ${xhr.status}`);
       console.log(xhr.responseText);
       showStatus("Read failed ❌", "danger", 3000);
+
+      aiTrackException(new Error(`Read failed ${xhr.status}`), aiCommonProps({ area: "read", status: String(xhr.status) }));
     })
     .always(function () {
       setBusy(false);
@@ -464,6 +548,8 @@ function selectAsset(id) {
   if (found) fillFormFromAsset(found);
   setSelectedId(id);
   showStatus(`Selected ${id} for update`, "info", 1500);
+
+  aiTrackEvent("AssetSelected", aiCommonProps({ assetId: String(id) }));
 }
 
 // --- DELETE ---
@@ -483,9 +569,12 @@ function deleteAsset(id) {
   })
     .done(function () {
       showStatus("Deleted ✅", "success", 1200);
+
+      aiTrackEvent("AssetDeleted", aiCommonProps({ assetId: String(id) }));
+
       if (selectedAssetId === id) setSelectedId(null);
 
-      if (currentPage > 1 && lastTotal > 0 && (lastTotal - 1) <= (currentPage - 1) * pageSize) {
+      if (currentPage > 1 && lastTotal > 0 && lastTotal - 1 <= (currentPage - 1) * pageSize) {
         currentPage--;
       }
       getAssetList();
@@ -494,6 +583,8 @@ function deleteAsset(id) {
       alert(`Delete failed: ${xhr.status}`);
       console.log(xhr.responseText);
       showStatus("Delete failed ❌", "danger", 3000);
+
+      aiTrackException(new Error(`Delete failed ${xhr.status}`), aiCommonProps({ area: "delete", status: String(xhr.status), assetId: String(id) }));
     })
     .always(function () {
       setBusy(false);
@@ -503,7 +594,8 @@ function deleteAsset(id) {
 // --- UPDATE ---
 async function updateAsset(id) {
   const updateObj = buildAssetFromForm();
-  if (!updateObj.AssetLabel || String(updateObj.AssetLabel).trim() === "") return alert("Asset Label is required before updating.");
+  if (!updateObj.AssetLabel || String(updateObj.AssetLabel).trim() === "")
+    return alert("Asset Label is required before updating.");
 
   setBusy(true);
 
@@ -530,12 +622,22 @@ async function updateAsset(id) {
       cache: false,
     });
 
+    aiTrackEvent(
+      "AssetUpdated",
+      aiCommonProps({
+        assetId: String(id),
+        hasNewImage: updateObj.MediaBlobName ? "true" : "false",
+      })
+    );
+
     showStatus("Updated ✅", "success", 1200);
     getAssetList();
   } catch (e) {
     alert(String(e));
     console.log(e);
     showStatus("Update failed ❌", "danger", 3000);
+
+    aiTrackException(e, aiCommonProps({ area: "update", assetId: String(id) }));
   } finally {
     setBusy(false);
   }
@@ -549,9 +651,18 @@ async function downloadAssetImage(blobName) {
     showStatus("Downloading…", "info", 0);
     await downloadViaFetch(sasUrl, fileNameFromBlobName(blobName));
     showStatus("Download started ✅", "success", 1200);
+
+    aiTrackEvent(
+      "PhotoDownloaded",
+      aiCommonProps({
+        blobName: String(blobName || ""),
+      })
+    );
   } catch (e) {
     alert(String(e));
     console.log(e);
     showStatus("Download failed ❌", "danger", 3000);
+
+    aiTrackException(e, aiCommonProps({ area: "download", blobName: String(blobName || "") }));
   }
 }
